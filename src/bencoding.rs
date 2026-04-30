@@ -20,7 +20,7 @@ impl Display for Bencoding {
                     if i + 1 == l.len() {
                         write!(f, "{}", val)?;
                     } else {
-                        write!(f, "{} ", val)?;
+                        write!(f, "{},", val)?;
                     }
                 }
                 write!(f, "]")
@@ -29,9 +29,9 @@ impl Display for Bencoding {
                 write!(f, "{{")?;
                 for (i, (key, val)) in d.iter().enumerate() {
                     if i + 1 == d.len() {
-                        write!(f, "{}: {}", key, val)?;
+                        write!(f, "{}:{}", key, val)?;
                     } else {
-                        write!(f, "{}: {} ", key, val)?;
+                        write!(f, "{}:{},", key, val)?;
                     }
                 }
                 write!(f, "}}")
@@ -51,20 +51,9 @@ impl Bencoding {
                     return Ok(Some(Self::Integer(num)));
                 }
                 'l' => {
-                    let len = read_util(iter, ':')?;
-                    let len: u64 = len.parse()?;
                     let mut list = Vec::new();
-                    for i in 0..len {
-                        let element = Self::decode(iter)?;
-                        if let Some(element) = element {
-                            list.push(element);
-                        } else {
-                            anyhow::ensure!(
-                                i + 1 == len,
-                                "list should has length {len}, but only found {}",
-                                i + 1
-                            );
-                        }
+                    while let Some(val) = Self::decode(iter)? {
+                        list.push(val);
                     }
                     return Ok(Some(Self::List(list)));
                 }

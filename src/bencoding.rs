@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, str::Chars};
+use std::{fmt::Display, str::Chars};
 
 use anyhow::Result;
 
@@ -6,7 +6,7 @@ pub enum Bencoding {
     String(String),
     Integer(i64),
     List(Vec<Bencoding>),
-    Dictionary(HashMap<String, Bencoding>),
+    Dictionary(Vec<(String, Bencoding)>),
 }
 
 impl Display for Bencoding {
@@ -29,9 +29,9 @@ impl Display for Bencoding {
                 write!(f, "{{")?;
                 for (i, (key, val)) in d.iter().enumerate() {
                     if i + 1 == d.len() {
-                        write!(f, "{}:{}", key, val)?;
+                        write!(f, "\"{}\":{}", key, val)?;
                     } else {
-                        write!(f, "{}:{},", key, val)?;
+                        write!(f, "\"{}\":{},", key, val)?;
                     }
                 }
                 write!(f, "}}")
@@ -58,7 +58,7 @@ impl Bencoding {
                     return Ok(Some(Self::List(list)));
                 }
                 'd' => {
-                    let mut dict = HashMap::new();
+                    let mut dict = Vec::new();
                     while let Some(encoding) = Self::decode(iter)? {
                         let Self::String(key) = encoding else {
                             anyhow::bail!("key in dictionary must be string")
@@ -66,7 +66,7 @@ impl Bencoding {
                         let Some(val) = Self::decode(iter)? else {
                             anyhow::bail!("no corresponding value to key {key} in dictionary")
                         };
-                        dict.insert(key, val);
+                        dict.push((key, val));
                     }
                     return Ok(Some(Self::Dictionary(dict)));
                 }
@@ -92,7 +92,7 @@ impl Bencoding {
 
 fn read_util(iter: &mut Chars, delimiter: char) -> Result<String> {
     let mut res = String::new();
-    while let Some(c) = iter.next() {
+    for c in iter.by_ref() {
         res.push(c);
         if c == delimiter {
             break;

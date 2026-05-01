@@ -18,7 +18,10 @@ impl Display for Bencoding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::String(s) => {
-                let s = str::from_utf8(&s).unwrap_or("a none-UTF8 string");
+                let s = match str::from_utf8(s) {
+                    Ok(s) => s,
+                    Err(_) => &hex::encode(s),
+                };
                 write!(f, "\"{}\"", s)
             }
             Self::Integer(i) => write!(f, "{}", i),
@@ -51,7 +54,7 @@ impl Display for Bencoding {
 impl Bencoding {
     pub fn decode(data: Vec<u8>) -> Result<Self> {
         let mut cur = Cursor::new(data);
-        return Self::decode_from_cursor(&mut cur);
+        Self::decode_from_cursor(&mut cur)
     }
 
     fn decode_from_cursor(cur: &mut Cursor<Vec<u8>>) -> Result<Self> {
@@ -65,7 +68,7 @@ impl Bencoding {
                     .context("failed to parse integer")?
                     .parse()
                     .context("failed to parse integer")?;
-                return Ok(Self::Integer(num));
+                Ok(Self::Integer(num))
             }
             b'l' => {
                 let mut list = Vec::new();
@@ -73,7 +76,7 @@ impl Bencoding {
                     cur.set_position(cur.position() - 1);
                     list.push(Self::decode_from_cursor(cur).context("failed to parse list")?);
                 }
-                return Ok(Self::List(list));
+                Ok(Self::List(list))
             }
             b'd' => {
                 let mut dict = BTreeMap::new();
@@ -87,7 +90,7 @@ impl Bencoding {
                         Self::decode_from_cursor(cur).context("failed to parse dictionary")?;
                     dict.insert(key, val);
                 }
-                return Ok(Self::Dictionary(dict));
+                Ok(Self::Dictionary(dict))
             }
             _ => {
                 let mut buf = vec![c];
@@ -99,7 +102,7 @@ impl Bencoding {
                     .context("cannot parse string length")?;
                 let mut s = vec![0u8; len];
                 cur.read_exact(&mut s).context("failed to parse string")?;
-                return Ok(Self::String(s));
+                Ok(Self::String(s))
             }
         }
     }
@@ -120,7 +123,7 @@ impl Bencoding {
             }
             Self::List(l) => {
                 let mut bytes = vec![b'l'];
-                for val in l.into_iter() {
+                for val in l.iter() {
                     bytes.extend(val.encode());
                 }
                 bytes.push(b'e');
@@ -128,7 +131,7 @@ impl Bencoding {
             }
             Self::Dictionary(d) => {
                 let mut bytes = vec![b'd'];
-                for (key, val) in d.into_iter() {
+                for (key, val) in d.iter() {
                     bytes.extend(Self::String(key.clone().into_bytes()).encode());
                     bytes.extend(val.encode());
                 }

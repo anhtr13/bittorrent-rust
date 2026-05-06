@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 
 use crate::bittorent::{
     encoding::Bencoding,
-    peer::{Message, MessageId, discover_peers, download_piece, establish_hanshake, new_peer_id},
+    peer::{Message, MessageId, discover_peers, download_piece, establish_hanshake},
     torrent::Torrent,
 };
 
@@ -29,10 +29,17 @@ pub enum Command {
 
     #[command(name = "download_piece")]
     DownloadPiece {
-        torrent: String,
         #[arg(short = 'o', long = "output")]
         output: String,
-        piece_index: u32,
+        torrent: String,
+        piece_index: u64,
+    },
+
+    #[command(name = "download")]
+    Download {
+        #[arg(short = 'o', long = "output")]
+        output: String,
+        torrent: String,
     },
 }
 
@@ -64,17 +71,7 @@ impl Cli {
             }
             Command::Peers { torrent } => {
                 let torrent = Torrent::from_file(&torrent)?;
-                let peer_id = new_peer_id();
-                let (_, peers) = discover_peers(
-                    &torrent.announce,
-                    &torrent.info.hash,
-                    &peer_id,
-                    6881,
-                    0,
-                    0,
-                    torrent.info.length,
-                    true,
-                )?;
+                let (_, peers) = discover_peers(&torrent, 6881, 0, 0, torrent.info.length, true)?;
                 for peer in peers {
                     println!("{peer}");
                 }
@@ -82,9 +79,8 @@ impl Cli {
             }
             Command::Handshake { torrent, addr } => {
                 let torrent = Torrent::from_file(&torrent)?;
-                let peer_id = new_peer_id();
                 let mut stream = TcpStream::connect(addr)?;
-                let peer_id_back = establish_hanshake(&mut stream, &torrent.info.hash, &peer_id)?;
+                let peer_id_back = establish_hanshake(&mut stream, &torrent.info.hash)?;
                 println!("Peer ID: {}", hex::encode(peer_id_back));
                 Ok(())
             }
@@ -94,20 +90,9 @@ impl Cli {
                 piece_index,
             } => {
                 let torrent = Torrent::from_file(&torrent)?;
-                let peer_id = new_peer_id();
-                let (_, peers) = discover_peers(
-                    &torrent.announce,
-                    &torrent.info.hash,
-                    &peer_id,
-                    6881,
-                    0,
-                    0,
-                    torrent.info.length,
-                    true,
-                )?;
+                let (_, peers) = discover_peers(&torrent, 6881, 0, 0, torrent.info.length, true)?;
                 let mut stream = TcpStream::connect(&peers[0])?;
-
-                let _ = establish_hanshake(&mut stream, &torrent.info.hash, &peer_id)?;
+                let _ = establish_hanshake(&mut stream, &torrent.info.hash)?;
 
                 let bitfield = Message::from_stream(&mut stream)?;
                 anyhow::ensure!(bitfield.id == MessageId::Bitfield);
@@ -118,13 +103,28 @@ impl Cli {
                 let unchoke = Message::from_stream(&mut stream)?;
                 anyhow::ensure!(unchoke.id == MessageId::Unchoke);
 
-                download_piece(
-                    &mut stream,
-                    piece_index,
-                    torrent.info.piece_length,
-                    torrent.info.length,
-                    &output,
-                )
+                download_piece(&mut stream, piece_index, &torrent, &output)
+            }
+            Command::Download { output, torrent } => {
+                let torrent = Torrent::from_file(&torrent)?;
+                let (_, peers) = discover_peers(&torrent, 6881, 0, 0, torrent.info.length, true)?;
+                let mut stream = TcpStream::connect(&peers[0])?;
+                let _ = establish_hanshake(&mut stream, &torrent.info.hash)?;
+
+                let bitfield = Message::from_stream(&mut stream)?;
+                anyhow::ensure!(bitfield.id == MessageId::Bitfield);
+
+                let interested = Message::new(MessageId::Interested, Vec::new());
+                stream.write_all(&interested.into_bytes())?;
+
+                let unchoke = Message::from_stream(&mut stream)?;
+                anyhow::ensure!(unchoke.id == MessageId::Unchoke);
+
+                for (idx, _) in torrent.info.pieces.iter().enumerate() {
+                    download_piece(&mut stream, idx as u64, &torrent, &output)?;
+                }
+
+                Ok(())
             }
         }
     }

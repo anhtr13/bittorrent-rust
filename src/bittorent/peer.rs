@@ -6,27 +6,26 @@ use std::{
 
 use anyhow::{Context, Result};
 use rand::{RngExt, distr::Alphanumeric};
+use sha1::{Digest, Sha1};
 
-use crate::bittorent::encoding::Bencoding;
+use crate::bittorent::{encoding::Bencoding, torrent::Torrent};
 
 pub const BLOCK_SIZE: u64 = 16384;
 
 #[allow(clippy::too_many_arguments)]
 pub fn discover_peers(
-    url: &str,
-    info_hash: &[u8],
-    peer_id: &str,
+    torrent: &Torrent,
     port: u16,
     uploaded: u32,
     downloaded: u32,
     left: u64,
     compact: bool,
 ) -> Result<(u64, Vec<String>)> {
-    let client = reqwest::blocking::Client::new();
+    let peer_id = new_peer_id();
     let url = format!(
         "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}",
-        url,
-        url_encode(info_hash).as_str(),
+        torrent.announce,
+        url_encode(&torrent.info.hash).as_str(),
         peer_id,
         port,
         uploaded,
@@ -34,6 +33,7 @@ pub fn discover_peers(
         left,
         compact as u8
     );
+    let client = reqwest::blocking::Client::new();
     let res = client.get(&url).send()?.bytes()?.to_vec();
     let data = Bencoding::decode(res)?;
     let Bencoding::Dictionary(dict) = data else {
@@ -56,13 +56,10 @@ pub fn discover_peers(
     Ok((interval, peers))
 }
 
-pub fn establish_hanshake(
-    stream: &mut TcpStream,
-    info_hash: &[u8; 20],
-    peer_id: &str,
-) -> Result<Vec<u8>> {
+pub fn establish_hanshake(stream: &mut TcpStream, info_hash: &[u8; 20]) -> Result<Vec<u8>> {
     let protocol = String::from("BitTorrent protocol");
     let reserved = [0u8; 8];
+    let peer_id = new_peer_id();
 
     let mut buf = Vec::new();
     buf.push(protocol.len() as u8);
@@ -83,15 +80,22 @@ pub fn establish_hanshake(
 
 pub fn download_piece(
     stream: &mut TcpStream,
-    piece_index: u32,
-    mut piece_length: u64,
-    total_length: u64,
+    piece_index: u64,
+    torrent: &Torrent,
     ouput: &str,
 ) -> Result<()> {
-    let mut file = OpenOptions::new().create(true).append(true).open(ouput)?;
-
-    piece_length = (total_length - piece_length * (piece_index as u64)).min(piece_length);
+    let total_length = torrent.info.length;
+    let Some(piece_hash) = torrent.info.pieces.get(piece_index as usize) else {
+        anyhow::bail!("piece_index out of range");
+    };
+    let piece_length = torrent.info.piece_length;
+    let mut piece_length = total_length
+        .saturating_sub(piece_length * piece_index)
+        .min(piece_length);
+    let piece_index = piece_index as u32;
+    let mut buffer = Vec::<u8>::new();
     let mut offset: u32 = 0;
+
     while piece_length > 0 {
         let length = piece_length.min(BLOCK_SIZE) as u32;
         piece_length = piece_length.saturating_sub(BLOCK_SIZE);
@@ -104,16 +108,28 @@ pub fn download_piece(
         let request = Message::new(MessageId::Request, payload);
         stream.write_all(&request.into_bytes())?;
 
-        let piece = Message::from_stream(stream)?;
-        anyhow::ensure!(piece.id == MessageId::Piece);
-        anyhow::ensure!(piece.payload.len() >= 8);
-        anyhow::ensure!(&piece.payload[..4] == piece_index.to_be_bytes());
-        anyhow::ensure!(&piece.payload[4..8] == offset.to_be_bytes());
+        let block = Message::from_stream(stream)?;
+        anyhow::ensure!(block.id == MessageId::Piece);
+        anyhow::ensure!(block.payload.len() >= 8);
+        anyhow::ensure!(&block.payload[..4] == piece_index.to_be_bytes());
+        anyhow::ensure!(&block.payload[4..8] == offset.to_be_bytes());
 
-        file.write_all(&piece.payload[8..])?;
-
+        buffer.extend(&block.payload[8..]);
         offset += length;
     }
+
+    let mut encoder = Sha1::new();
+    encoder.update(&buffer);
+    let hash: [u8; 20] = encoder
+        .finalize()
+        .to_vec()
+        .try_into()
+        .map_err(|_| anyhow::Error::msg("failed to encode piece to 20 bytes array"))?;
+
+    anyhow::ensure!(&hash == piece_hash, "piece_hash miss match");
+
+    let mut file = OpenOptions::new().create(true).append(true).open(ouput)?;
+    file.write_all(&buffer)?;
     Ok(())
 }
 

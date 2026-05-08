@@ -4,12 +4,13 @@ use clap::Parser;
 
 use crate::bittorent::Cli;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     eprintln!("Logs from program:");
 
-    match cli.run() {
+    match cli.run().await {
         Ok(_) => {}
         Err(e) => eprintln!("Error: {e}"),
     }

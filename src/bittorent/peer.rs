@@ -1,19 +1,20 @@
-use std::{
-    fs::OpenOptions,
-    io::{Read, Write},
-    net::TcpStream,
-};
+use std::{fs::OpenOptions, io::Write, sync::Arc};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rand::{RngExt, distr::Alphanumeric};
 use sha1::{Digest, Sha1};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::Mutex,
+};
 
 use crate::bittorent::{encoding::Bencoding, torrent::Torrent};
 
-pub const BLOCK_SIZE: u64 = 16384;
+pub const BLOCK_SIZE: u32 = 16384;
 
 #[allow(clippy::too_many_arguments)]
-pub fn discover_peers(
+pub async fn discover_peers(
     torrent: &Torrent,
     port: u16,
     uploaded: u32,
@@ -21,7 +22,7 @@ pub fn discover_peers(
     left: u64,
     compact: bool,
 ) -> Result<(u64, Vec<String>)> {
-    let peer_id = new_peer_id();
+    let peer_id = generate_peer_id();
     let url = format!(
         "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}",
         torrent.announce,
@@ -33,8 +34,8 @@ pub fn discover_peers(
         left,
         compact as u8
     );
-    let client = reqwest::blocking::Client::new();
-    let res = client.get(&url).send()?.bytes()?.to_vec();
+    let client = reqwest::Client::new();
+    let res = client.get(&url).send().await?.bytes().await?.to_vec();
     let data = Bencoding::decode(res)?;
     let Bencoding::Dictionary(dict) = data else {
         anyhow::bail!("tracker response must be a dictionary")
@@ -56,10 +57,10 @@ pub fn discover_peers(
     Ok((interval, peers))
 }
 
-pub fn establish_hanshake(stream: &mut TcpStream, info_hash: &[u8; 20]) -> Result<Vec<u8>> {
+pub async fn hanshake(stream: &mut TcpStream, info_hash: &[u8]) -> Result<Vec<u8>> {
     let protocol = String::from("BitTorrent protocol");
     let reserved = [0u8; 8];
-    let peer_id = new_peer_id();
+    let peer_id = generate_peer_id();
 
     let mut buf = Vec::new();
     buf.push(protocol.len() as u8);
@@ -67,10 +68,10 @@ pub fn establish_hanshake(stream: &mut TcpStream, info_hash: &[u8; 20]) -> Resul
     buf.extend(reserved);
     buf.extend(info_hash);
     buf.extend(peer_id.as_bytes());
-    stream.write_all(&buf)?;
+    stream.write_all(&buf).await?;
 
     let mut buf = [0u8; 68];
-    stream.read_exact(&mut buf)?;
+    stream.read_exact(&mut buf).await?;
     anyhow::ensure!(buf[0] == 19);
     anyhow::ensure!(&buf[1..20] == b"BitTorrent protocol");
     anyhow::ensure!(&buf[28..48] == info_hash);
@@ -78,67 +79,129 @@ pub fn establish_hanshake(stream: &mut TcpStream, info_hash: &[u8; 20]) -> Resul
     Ok(buf[48..].to_owned())
 }
 
-pub fn download_piece(
-    stream: &mut TcpStream,
-    piece_index: u64,
+pub async fn download_piece(
+    peers: &mut [Arc<Mutex<TcpStream>>],
+    piece_index: u32,
     torrent: &Torrent,
-    ouput: &str,
+    output: &str,
 ) -> Result<()> {
-    let total_length = torrent.info.length;
     let Some(piece_hash) = torrent.info.pieces.get(piece_index as usize) else {
         anyhow::bail!("piece_index out of range");
     };
-    let piece_length = torrent.info.piece_length;
-    let mut piece_length = total_length
-        .saturating_sub(piece_length * piece_index)
-        .min(piece_length);
-    let piece_index = piece_index as u32;
-    let mut buffer = Vec::<u8>::new();
-    let mut offset: u32 = 0;
-
-    while piece_length > 0 {
-        let length = piece_length.min(BLOCK_SIZE) as u32;
-        piece_length = piece_length.saturating_sub(BLOCK_SIZE);
-
-        let mut payload = Vec::new();
-        payload.extend(piece_index.to_be_bytes());
-        payload.extend(offset.to_be_bytes());
-        payload.extend(length.to_be_bytes());
-
-        let request = Message::new(MessageId::Request, payload);
-        stream.write_all(&request.into_bytes())?;
-
-        let block = Message::from_stream(stream)?;
-        anyhow::ensure!(block.id == MessageId::Piece);
-        anyhow::ensure!(block.payload.len() >= 8);
-        anyhow::ensure!(&block.payload[..4] == piece_index.to_be_bytes());
-        anyhow::ensure!(&block.payload[4..8] == offset.to_be_bytes());
-
-        buffer.extend(&block.payload[8..]);
-        offset += length;
+    let piece_length = torrent
+        .info
+        .length
+        .saturating_sub(torrent.info.piece_length * piece_index as u64)
+        .min(torrent.info.piece_length) as u32;
+    let mut num_blocks = piece_length / BLOCK_SIZE;
+    if num_blocks * BLOCK_SIZE < piece_length {
+        num_blocks += 1;
     }
 
+    let blocks = Arc::new(Mutex::new(vec![false; num_blocks as usize]));
+    let piece = Arc::new(Mutex::new(vec![0u8; piece_length as usize]));
+    let mut handles = Vec::new();
+
+    for peer in peers {
+        let peer = peer.clone();
+        let blocks = blocks.clone();
+        let piece = piece.clone();
+        handles.push(tokio::spawn(async move {
+            loop {
+                let mut guard = blocks.lock().await;
+                let Some(idx) = guard.iter().position(|downloaded| !downloaded) else {
+                    break;
+                };
+                guard[idx] = true;
+                drop(guard);
+                let offset = idx as u32 * BLOCK_SIZE;
+                let length = (piece_length - offset).min(BLOCK_SIZE);
+                let (_, data) = download_piece_block(peer.clone(), piece_index, offset, length)
+                    .await
+                    .expect("failed to download piece block");
+                let mut piece = piece.lock().await;
+                (*piece)[offset as usize..(offset + length) as usize].copy_from_slice(&data);
+                println!(
+                    "Downloaded block (offset: {}, length: {}) of piece {}",
+                    offset, length, piece_index
+                );
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.await?;
+    }
+
+    let piece = Arc::try_unwrap(piece)
+        .map_err(|_| anyhow::Error::msg("unwrap Arc failed"))?
+        .into_inner();
     let mut encoder = Sha1::new();
-    encoder.update(&buffer);
+    encoder.update(&piece);
     let hash: [u8; 20] = encoder
         .finalize()
         .to_vec()
         .try_into()
-        .map_err(|_| anyhow::Error::msg("failed to encode piece to 20 bytes array"))?;
+        .map_err(|_| anyhow::Error::msg("sha1 hash failed"))?;
 
-    anyhow::ensure!(&hash == piece_hash, "piece_hash miss match");
+    anyhow::ensure!(&hash == piece_hash, "piece hash miss match");
 
-    let mut file = OpenOptions::new().create(true).append(true).open(ouput)?;
-    file.write_all(&buffer)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(output)?;
+    file.write_all(&piece)?;
+
     Ok(())
 }
 
-pub fn new_peer_id() -> String {
-    rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(20)
-        .map(char::from)
-        .collect()
+async fn download_piece_block(
+    stream: Arc<Mutex<TcpStream>>,
+    piece_index: u32,
+    offset: u32,
+    length: u32,
+) -> Result<(u32, Vec<u8>)> {
+    let mut payload = Vec::new();
+    payload.extend(piece_index.to_be_bytes());
+    payload.extend(offset.to_be_bytes());
+    payload.extend(length.to_be_bytes());
+
+    let request = Message::new(MessageId::Request, payload);
+
+    let mut stream = stream.lock().await;
+    stream.write_all(&request.into_bytes()).await?;
+
+    let block = Message::from_stream(&mut stream).await?;
+    anyhow::ensure!(block.id == MessageId::Piece);
+    anyhow::ensure!(block.payload.len() >= 8);
+    anyhow::ensure!(&block.payload[..4] == piece_index.to_be_bytes());
+    anyhow::ensure!(&block.payload[4..8] == offset.to_be_bytes());
+
+    let data = block.payload[8..].to_vec();
+    Ok((offset, data))
+}
+
+pub async fn establish_peers(addrs: &[String], info_hash: &[u8]) -> Vec<TcpStream> {
+    let mut peers = Vec::new();
+    for addr in addrs {
+        if let Ok(peer) = establish_peer(addr, info_hash).await {
+            peers.push(peer);
+        }
+    }
+    peers
+}
+
+async fn establish_peer(addr: &str, info_hash: &[u8]) -> Result<TcpStream> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let _ = hanshake(&mut stream, info_hash).await?;
+
+    let bitfield = Message::from_stream(&mut stream).await?;
+    anyhow::ensure!(bitfield.id == MessageId::Bitfield);
+
+    let interested = Message::new(MessageId::Interested, Vec::new());
+    stream.write_all(&interested.into_bytes()).await?;
+
+    let unchoke = Message::from_stream(&mut stream).await?;
+    anyhow::ensure!(unchoke.id == MessageId::Unchoke);
+
+    Ok(stream)
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -164,19 +227,15 @@ impl Message {
         Self { id, payload }
     }
 
-    pub fn from_stream(stream: &mut TcpStream) -> Result<Self> {
+    pub async fn from_stream(stream: &mut TcpStream) -> Result<Self> {
         let mut buf = [0u8; 4];
-        stream
-            .read_exact(&mut buf)
-            .context("failed to read message length")?;
+        stream.read_exact(&mut buf).await?;
 
         let length = u32::from_be_bytes(buf);
         anyhow::ensure!(length > 0);
 
         let mut id = [0u8; 1];
-        stream
-            .read_exact(&mut id)
-            .context("failed to read message id")?;
+        stream.read_exact(&mut id).await?;
 
         let length = length as usize - 1;
         if length == 0 {
@@ -187,9 +246,7 @@ impl Message {
         }
 
         let mut payload = vec![0u8; length];
-        stream
-            .read_exact(&mut payload)
-            .context("failed to read message payload")?;
+        stream.read_exact(&mut payload).await?;
 
         Ok(Self {
             id: MessageId::try_from(id[0])?,
@@ -223,6 +280,14 @@ impl TryFrom<u8> for MessageId {
             v => anyhow::bail!("Invalid message id: {}", v),
         }
     }
+}
+
+fn generate_peer_id() -> String {
+    rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(20)
+        .map(char::from)
+        .collect()
 }
 
 fn url_encode(bytes: &[u8]) -> String {

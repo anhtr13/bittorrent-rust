@@ -1,6 +1,7 @@
-pub mod encoding;
-pub mod peer;
-pub mod torrent;
+mod encoding;
+mod magnet_link;
+mod peer;
+mod torrent;
 
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use tokio::{net::TcpStream, sync::Mutex};
 
 use crate::bittorent::{
     encoding::Bencoding,
+    magnet_link::MagnetLink,
     peer::{discover_peers, download_piece, establish_peers, hanshake},
     torrent::Torrent,
 };
@@ -42,6 +44,9 @@ pub enum Command {
         output: String,
         torrent: String,
     },
+
+    #[command(name = "magnet_parse")]
+    MagnetParse { link: String },
 }
 
 #[derive(Parser)]
@@ -114,6 +119,12 @@ impl Cli {
                 for idx in 0..torrent.info.pieces.len() {
                     download_piece(&mut peers, idx as u32, &torrent, &output).await?;
                 }
+                Ok(())
+            }
+            Command::MagnetParse { link } => {
+                let info = MagnetLink::parse(link)?;
+                println!("Tracker URL: {}", info.tracker_url);
+                println!("Info Hash: {}", hex::encode(info.info_hash));
                 Ok(())
             }
         }

@@ -1,13 +1,13 @@
 use anyhow::Result;
 
 #[allow(unused)]
-pub struct MagnetLink {
+pub struct Magnet {
     pub file_name: String,
     pub tracker_url: String,
     pub info_hash: [u8; 20],
 }
 
-impl MagnetLink {
+impl Magnet {
     pub fn parse(link: String) -> Result<Self> {
         anyhow::ensure!(&link[..8] == "magnet:?");
         let tokens: Vec<_> = link[8..].split('&').collect();
@@ -22,10 +22,10 @@ impl MagnetLink {
             };
             match lhs {
                 "xt" => {
-                    let Some((sign, hash)) = rhs.rsplit_once(':') else {
+                    let Some((sig, hash)) = rhs.rsplit_once(':') else {
                         anyhow::bail!("unknow token: {token}");
                     };
-                    anyhow::ensure!(sign == "urn:btih");
+                    anyhow::ensure!(sig == "urn:btih");
                     info_hash = hex::decode(hash)?;
                 }
                 "dn" => {

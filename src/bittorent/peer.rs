@@ -2,14 +2,13 @@ use std::{fs::OpenOptions, io::Write, sync::Arc};
 
 use anyhow::Result;
 use rand::{RngExt, distr::Alphanumeric};
-use sha1::{Digest, Sha1};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::Mutex,
 };
 
-use crate::bittorent::{encoding::Bencoding, torrent::Torrent};
+use crate::bittorent::{encoding::Bencoding, sha1_hash, torrent::Torrent};
 
 pub const BLOCK_SIZE: u32 = 16 * 1024;
 
@@ -125,8 +124,8 @@ pub async fn download_piece(
                 let mut piece = piece.lock().await;
                 (*piece)[offset as usize..(offset + length) as usize].copy_from_slice(&data);
                 println!(
-                    "Downloaded from piece {}: (block {}, offset {}, length {})",
-                    piece_index, block_index, offset, length
+                    "Downloaded from piece {}: {} bytes, offset {}",
+                    piece_index, length, offset
                 );
             }
         }));
@@ -140,13 +139,7 @@ pub async fn download_piece(
         .map_err(|_| anyhow::Error::msg("failed to get piece"))?
         .into_inner();
 
-    let mut encoder = Sha1::new();
-    encoder.update(&piece_data);
-    let checksum: [u8; 20] = encoder
-        .finalize()
-        .to_vec()
-        .try_into()
-        .map_err(|_| anyhow::Error::msg("sha1 hash failed"))?;
+    let checksum = sha1_hash(&piece_data);
     anyhow::ensure!(&checksum == piece_hash, "checksum miss match");
 
     let output = output.unwrap_or(&torrent.info.name);
@@ -183,25 +176,35 @@ async fn download_piece_block(
 }
 
 pub async fn establish_peers(
-    addrs: &[String],
-    info_hash: &[u8],
+    addrs: &[Arc<String>],
+    info_hash: Arc<[u8]>,
     max_peers: usize,
-) -> Vec<TcpStream> {
-    let mut peers = Vec::new();
-    for addr in addrs {
-        if let Ok(peer) = establish_peer(addr, info_hash).await {
-            peers.push(peer);
-        }
-        if peers.len() == max_peers {
-            break;
-        }
+) -> Result<Vec<TcpStream>> {
+    let peers = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::new();
+    for addr in addrs.iter().take(max_peers) {
+        let peers = peers.clone();
+        let addr = addr.clone();
+        let info_hash = info_hash.clone();
+        handles.push(tokio::spawn(async move {
+            if let Ok(peer) = establish_peer(addr, info_hash).await {
+                let mut guard = peers.lock().await;
+                (*guard).push(peer);
+            }
+        }));
     }
-    peers
+    for handle in handles {
+        handle.await?;
+    }
+    let peers = Arc::try_unwrap(peers)
+        .map_err(|_| anyhow::Error::msg("failed to get peers"))?
+        .into_inner();
+    Ok(peers)
 }
 
-async fn establish_peer(addr: &str, info_hash: &[u8]) -> Result<TcpStream> {
-    let mut stream = TcpStream::connect(addr).await?;
-    let _ = hanshake(&mut stream, info_hash).await?;
+async fn establish_peer(addr: Arc<String>, info_hash: Arc<[u8]>) -> Result<TcpStream> {
+    let mut stream = TcpStream::connect(addr.as_ref()).await?;
+    let _ = hanshake(&mut stream, &info_hash).await?;
 
     let bitfield = Message::from_stream(&mut stream).await?;
     anyhow::ensure!(bitfield.id == MessageId::Bitfield);

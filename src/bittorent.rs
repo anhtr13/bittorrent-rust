@@ -1,5 +1,5 @@
 mod encoding;
-mod magnet_link;
+mod magnet;
 mod peer;
 mod torrent;
 
@@ -7,11 +7,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use sha1::{Digest, Sha1};
 use tokio::{net::TcpStream, sync::Mutex};
 
 use crate::bittorent::{
     encoding::Bencoding,
-    magnet_link::MagnetLink,
+    magnet::Magnet,
     peer::{discover_peers, download_piece, establish_peers, hanshake},
     torrent::Torrent,
 };
@@ -99,8 +100,9 @@ impl Cli {
                 let torrent = Torrent::from_file(&torrent)?;
                 let (_, addrs) =
                     discover_peers(&torrent, 6881, 0, 0, torrent.info.length, true).await?;
-                let peers: Vec<_> = establish_peers(&addrs, &torrent.info.hash, 4)
-                    .await
+                let addrs: Vec<_> = addrs.into_iter().map(Arc::new).collect();
+                let peers: Vec<_> = establish_peers(&addrs, Arc::new(torrent.info.hash), 8)
+                    .await?
                     .into_iter()
                     .map(|peer| Arc::new(Mutex::new(peer)))
                     .collect();
@@ -111,8 +113,9 @@ impl Cli {
                 let torrent = Torrent::from_file(&torrent)?;
                 let (_, addrs) =
                     discover_peers(&torrent, 6881, 0, 0, torrent.info.length, true).await?;
-                let peers: Vec<_> = establish_peers(&addrs, &torrent.info.hash, 4)
-                    .await
+                let addrs: Vec<_> = addrs.into_iter().map(Arc::new).collect();
+                let peers: Vec<_> = establish_peers(&addrs, Arc::new(torrent.info.hash), 8)
+                    .await?
                     .into_iter()
                     .map(|peer| Arc::new(Mutex::new(peer)))
                     .collect();
@@ -122,11 +125,18 @@ impl Cli {
                 Ok(())
             }
             Command::MagnetParse { link } => {
-                let info = MagnetLink::parse(link)?;
+                let info = Magnet::parse(link)?;
                 println!("Tracker URL: {}", info.tracker_url);
                 println!("Info Hash: {}", hex::encode(info.info_hash));
                 Ok(())
             }
         }
     }
+}
+
+fn sha1_hash(data: &[u8]) -> [u8; 20] {
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    result.into()
 }

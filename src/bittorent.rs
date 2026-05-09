@@ -48,6 +48,9 @@ pub enum Command {
 
     #[command(name = "magnet_parse")]
     MagnetParse { link: String },
+
+    #[command(name = "magnet_handshake")]
+    MagnetHandshake { link: String },
 }
 
 #[derive(Parser)]
@@ -78,8 +81,16 @@ impl Cli {
             }
             Command::Peers { torrent } => {
                 let torrent = Torrent::from_file(&torrent)?;
-                let (_, addrs) =
-                    discover_peers(&torrent, 6881, 0, 0, torrent.info.length, true).await?;
+                let (_, addrs) = discover_peers(
+                    &torrent.announce,
+                    &torrent.info.hash,
+                    6881,
+                    0,
+                    0,
+                    torrent.info.length,
+                    true,
+                )
+                .await?;
                 for addr in addrs {
                     println!("{addr}");
                 }
@@ -88,7 +99,7 @@ impl Cli {
             Command::Handshake { torrent, addr } => {
                 let torrent = Torrent::from_file(&torrent)?;
                 let mut stream = TcpStream::connect(addr).await?;
-                let peer_id_back = hanshake(&mut stream, &torrent.info.hash).await?;
+                let peer_id_back = hanshake(&mut stream, &torrent.info.hash, false).await?;
                 println!("Peer ID: {}", hex::encode(peer_id_back));
                 Ok(())
             }
@@ -98,8 +109,16 @@ impl Cli {
                 piece_index,
             } => {
                 let torrent = Torrent::from_file(&torrent)?;
-                let (_, addrs) =
-                    discover_peers(&torrent, 6881, 0, 0, torrent.info.length, true).await?;
+                let (_, addrs) = discover_peers(
+                    &torrent.announce,
+                    &torrent.info.hash,
+                    6881,
+                    0,
+                    0,
+                    torrent.info.length,
+                    true,
+                )
+                .await?;
                 let addrs: Vec<_> = addrs.into_iter().map(Arc::new).collect();
                 let peers: Vec<_> = establish_peers(&addrs, Arc::new(torrent.info.hash), 8)
                     .await?
@@ -111,8 +130,16 @@ impl Cli {
             }
             Command::Download { output, torrent } => {
                 let torrent = Torrent::from_file(&torrent)?;
-                let (_, addrs) =
-                    discover_peers(&torrent, 6881, 0, 0, torrent.info.length, true).await?;
+                let (_, addrs) = discover_peers(
+                    &torrent.announce,
+                    &torrent.info.hash,
+                    6881,
+                    0,
+                    0,
+                    torrent.info.length,
+                    true,
+                )
+                .await?;
                 let addrs: Vec<_> = addrs.into_iter().map(Arc::new).collect();
                 let peers: Vec<_> = establish_peers(&addrs, Arc::new(torrent.info.hash), 8)
                     .await?
@@ -125,9 +152,26 @@ impl Cli {
                 Ok(())
             }
             Command::MagnetParse { link } => {
-                let info = Magnet::parse(link)?;
-                println!("Tracker URL: {}", info.tracker_url);
-                println!("Info Hash: {}", hex::encode(info.info_hash));
+                let magnet_info = Magnet::parse(link)?;
+                println!("Tracker URL: {}", magnet_info.tracker_url);
+                println!("Info Hash: {}", hex::encode(magnet_info.info_hash));
+                Ok(())
+            }
+            Command::MagnetHandshake { link } => {
+                let magnet_info = Magnet::parse(link)?;
+                let (_, addrs) = discover_peers(
+                    &magnet_info.tracker_url,
+                    &magnet_info.info_hash,
+                    6881,
+                    0,
+                    0,
+                    9999,
+                    true,
+                )
+                .await?;
+                let mut stream = TcpStream::connect(&addrs[0]).await?;
+                let peer_id_back = hanshake(&mut stream, &magnet_info.info_hash, true).await?;
+                println!("Peer ID: {}", hex::encode(peer_id_back));
                 Ok(())
             }
         }

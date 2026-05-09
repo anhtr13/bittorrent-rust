@@ -14,7 +14,8 @@ pub const BLOCK_SIZE: u32 = 16 * 1024;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn discover_peers(
-    torrent: &Torrent,
+    url: &str,
+    info_hash: &[u8],
     port: u16,
     uploaded: u32,
     downloaded: u32,
@@ -24,8 +25,8 @@ pub async fn discover_peers(
     let peer_id = generate_peer_id();
     let url = format!(
         "{}?info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&compact={}",
-        torrent.announce,
-        url_encode(&torrent.info.hash).as_str(),
+        url,
+        url_encode(info_hash).as_str(),
         peer_id,
         port,
         uploaded,
@@ -56,10 +57,18 @@ pub async fn discover_peers(
     Ok((interval, peers))
 }
 
-pub async fn hanshake(stream: &mut TcpStream, info_hash: &[u8]) -> Result<Vec<u8>> {
+pub async fn hanshake(
+    stream: &mut TcpStream,
+    info_hash: &[u8],
+    extension: bool,
+) -> Result<Vec<u8>> {
     let protocol = String::from("BitTorrent protocol");
-    let reserved = [0u8; 8];
     let peer_id = generate_peer_id();
+    let reserved = if extension {
+        [0, 0, 0, 0, 0, 16, 0, 0]
+    } else {
+        [0u8; 8]
+    };
 
     let mut buf = Vec::new();
     buf.push(protocol.len() as u8);
@@ -204,7 +213,7 @@ pub async fn establish_peers(
 
 async fn establish_peer(addr: Arc<String>, info_hash: Arc<[u8]>) -> Result<TcpStream> {
     let mut stream = TcpStream::connect(addr.as_ref()).await?;
-    let _ = hanshake(&mut stream, &info_hash).await?;
+    let _ = hanshake(&mut stream, &info_hash, false).await?;
 
     let bitfield = Message::from_stream(&mut stream).await?;
     anyhow::ensure!(bitfield.id == MessageId::Bitfield);

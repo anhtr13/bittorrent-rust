@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, fs::OpenOptions, io::Write, sync::Arc, time::Duration};
+mod extension;
+mod message;
+
+use std::{fs::OpenOptions, io::Write, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use rand::{RngExt, distr::Alphanumeric};
@@ -11,7 +14,10 @@ use tokio::{
 
 use crate::bittorent::{
     encoding::Bencoding,
-    peer_message::{Message, MessageId, send_interested, wait_for_bitfield, wait_for_unchoke},
+    peer::{
+        extension::ExtensionMessage,
+        message::{Message, MessageId, send_interested, wait_for_bitfield, wait_for_unchoke},
+    },
     sha1_hash,
     torrent::Torrent,
 };
@@ -232,7 +238,7 @@ async fn download_piece_block(
     Ok((offset, data))
 }
 
-pub async fn extended_hanshake(stream: &mut TcpStream, info_hash: &[u8]) -> Result<Vec<u8>> {
+pub async fn extended_hanshake(stream: &mut TcpStream, info_hash: &[u8]) -> Result<(Vec<u8>, u8)> {
     let peer_id = generate_peer_id();
     let mut buf = Vec::new();
     buf.push(19);
@@ -253,20 +259,15 @@ pub async fn extended_hanshake(stream: &mut TcpStream, info_hash: &[u8]) -> Resu
 
     wait_for_bitfield(stream).await?;
 
-    let mut payload = vec![0u8];
-    let metadata = BTreeMap::from([
-        (String::from("ut_metadata"), Bencoding::Integer(1)),
-        (String::from("ut_pex"), Bencoding::Integer(2)),
-    ]);
-    let dict = BTreeMap::from([(String::from("m"), Bencoding::Dictionary(metadata))]);
-    payload.extend(Bencoding::Dictionary(dict).encode());
+    let payload = ExtensionMessage::new(1, None).encode();
     let ext_msg = Message::new(MessageId::Extension, payload);
     stream.write_all(&ext_msg.into_bytes()).await?;
 
     let ext_msg_back = Message::from_stream(stream).await?;
     anyhow::ensure!(ext_msg_back.id == MessageId::Extension);
+    let ext_info = ExtensionMessage::decode(ext_msg_back.payload)?;
 
-    Ok(buf[48..].to_owned())
+    Ok((buf[48..].to_owned(), ext_info.metadata.ut_metadata))
 }
 
 fn generate_peer_id() -> String {

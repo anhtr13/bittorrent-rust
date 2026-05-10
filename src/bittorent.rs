@@ -1,7 +1,6 @@
 mod encoding;
 mod magnet;
 mod peer;
-mod peer_message;
 mod torrent;
 
 use std::sync::Arc;
@@ -175,8 +174,10 @@ impl Cli {
                 )
                 .await?;
                 let mut stream = TcpStream::connect(&addrs[0]).await?;
-                let peer_id_back = extended_hanshake(&mut stream, &magnet_info.info_hash).await?;
+                let (peer_id_back, ut_metadata) =
+                    extended_hanshake(&mut stream, &magnet_info.info_hash).await?;
                 println!("Peer ID: {}", hex::encode(peer_id_back));
+                println!("Peer Metadata Extension ID: {}", ut_metadata);
                 Ok(())
             }
         }

@@ -207,6 +207,12 @@ pub async fn download_piece(
     let checksum = sha1_hash(&piece_data);
     anyhow::ensure!(&checksum == piece_hash, "checksum miss match");
 
+    println!(
+        "Downloaded piece {}: {} bytes",
+        piece_index,
+        piece_data.len()
+    );
+
     let output = output.unwrap_or(&info.name);
     let mut file = OpenOptions::new().create(true).append(true).open(output)?;
     file.write_all(&piece_data)?;
